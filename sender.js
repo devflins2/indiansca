@@ -3,6 +3,7 @@ const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram/tl');
 const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const youtubedl = require('youtube-dl-exec');
 const fs = require('fs');
 const path = require('path');
 const { config } = require('./config');
@@ -108,46 +109,51 @@ function formatNumber(num) {
   return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
-/**
- * Download video directly into memory buffer — no disk usage on Render
- */
-async function downloadToBuffer(url, videoId) {
-  log(`📥 Downloading ${videoId} into memory...`);
+async function downloadToBuffer(url, video) {
+  log(`📥 Downloading ${video.id} using yt-dlp...`);
 
   try {
-    const axiosOptions = {
-      method: 'GET',
-      url: url,
-      responseType: 'arraybuffer',
-      timeout: 600000, // 10 min for large files
-      maxContentLength: config.limits.maxFileSizeBytes,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Referer': config.provider.refererUrl || '',
-        'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8',
-      },
+    const tempDir = path.join(__dirname, 'temp');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+
+    const tempPath = path.join(tempDir, `${video.id}.mp4`);
+    const targetUrl = video.page_url || url;
+
+    const ytDlpOptions = {
+      output: tempPath,
+      format: 'best[ext=mp4]/best',
+      maxFilesize: '500M',
+      noWarnings: true
     };
 
-    const agent = getProxyAgent();
-    if (agent) axiosOptions.httpsAgent = agent;
-
-    const response = await axios(axiosOptions);
-    const buffer = Buffer.from(response.data);
-
-    if (buffer.length === 0) {
-      log(`⚠️ Empty buffer received for ${videoId}. Skipping.`);
-      return null;
+    if (config.provider.proxyUrl) {
+      ytDlpOptions.proxy = config.provider.proxyUrl;
     }
 
-    if (buffer.length > config.limits.maxFileSizeBytes) {
-      log(`⚠️ Buffer too large: ${formatBytes(buffer.length)}. Skipping.`);
-      return null;
+    await youtubedl(targetUrl, ytDlpOptions);
+
+    if (fs.existsSync(tempPath)) {
+      const buffer = fs.readFileSync(tempPath);
+      fs.unlinkSync(tempPath); // Clean up immediately from disk
+
+      if (buffer.length > config.limits.maxFileSizeBytes) {
+        log(`⚠️ Buffer too large: ${formatBytes(buffer.length)}. Skipping.`);
+        return null;
+      }
+
+      log(`✅ Downloaded to memory via yt-dlp: ${formatBytes(buffer.length)}`);
+      return buffer;
     }
 
-    log(`✅ Downloaded to memory: ${formatBytes(buffer.length)}`);
-    return buffer;
+    return null;
   } catch (error) {
-    logError(`Download failed for ${videoId}`, error);
+    logError(`yt-dlp download failed for ${video.id}`, error);
+    const tempPath = path.join(__dirname, 'temp', `${video.id}.mp4`);
+    if (fs.existsSync(tempPath)) {
+      try { fs.unlinkSync(tempPath); } catch (e) { }
+    }
     return null;
   }
 }
@@ -183,7 +189,7 @@ async function sendVideoToGroup(video) {
     }
 
     // Step 3: Download into memory buffer (no disk I/O)
-    let videoBuffer = await downloadToBuffer(downloadSource.url, video.id);
+    let videoBuffer = await downloadToBuffer(downloadSource.url, video);
 
     if (!videoBuffer) {
       log(`⚠️ Download failed for ${video.id}. Skipping.`);
@@ -366,4 +372,5 @@ module.exports = {
   sendVideoToGroup,
   processBatch,
   buildCaption,
+  downloadToBuffer,
 };
