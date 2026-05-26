@@ -1,0 +1,23 @@
+{
+  "name": "media-telegram-uploader",
+  "version": "1.0.0",
+  "description": "Scrapes Indian media from provider API and sends to Telegram group",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "auth": "node session.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongodb": "^6.7.0",
+    "telegram": "^2.22.2",
+    "input": "^1.0.1",
+    "big-integer": "^1.6.52",
+    "https-proxy-agent": "^7.0.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
