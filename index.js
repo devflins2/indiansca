@@ -283,6 +283,7 @@ async function uploadToTelegram(videoPath, title, thumbPath, channelId, tags, st
 
     let retries = 0;
     let lastUpdate = 0;
+    let lastTerminalUpdate = 0;
     
     while (retries < CONFIG.MAX_RETRIES) {
         try {
@@ -296,9 +297,13 @@ async function uploadToTelegram(videoPath, title, thumbPath, channelId, tags, st
                 progressCallback: (uploaded, total) => {
                     if (total > 0) {
                         const pct = ((uploaded / total) * 100).toFixed(1);
-                        process.stdout.write(`\r📤 Telegram Uploading: ${pct}% `);
 
                         const now = Date.now();
+                        if (now - lastTerminalUpdate > 20000) {
+                            lastTerminalUpdate = now;
+                            console.log(`📤 Telegram Uploading: ${pct}%`);
+                        }
+
                         // 10 second throttle for Telegram edit
                         if (statusMsgId && (now - lastUpdate > 10000)) {
                             lastUpdate = now;
@@ -312,7 +317,6 @@ async function uploadToTelegram(videoPath, title, thumbPath, channelId, tags, st
                 }
             });
 
-            process.stdout.write('\n');
             console.log(`✅ Uploaded: ${title} | Message ID: ${message.id}`);
             return message;
         } catch (err) {
