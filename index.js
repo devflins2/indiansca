@@ -241,9 +241,12 @@ async function getTelegramClient() {
         CONFIG.API_ID,
         CONFIG.API_HASH,
         {
-            connectionRetries: 5,
-            retryDelay: 1000,
+            connectionRetries: -1,          // Unlimited retries (kabhi give up mat kar)
+            retryDelay: 3000,               // 3 sec wait between retries
             autoReconnect: true,
+            requestRetries: 5,              // Har request 5 baar retry karega
+            keepAliveInterval: 10000,       // Har 10 sec mein ping bhejega → idle disconnect nahi hoga
+            floodSleepThreshold: 60,        // FloodWait errors ko auto handle karega
         }
     );
 
