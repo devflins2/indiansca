@@ -33,7 +33,7 @@ const CONFIG = {
     // .env file se configurations load ho rahe hain
     CHANNEL_ID_KEYWORDS: process.env.CHANNEL_ID_KEYWORDS,
     CHANNEL_ID_DEFLORATION: process.env.CHANNEL_ID_DEFLORATION,
-    TARGET_DOMAIN: process.env.TARGET_DOMAIN,
+    TARGET_DOMAIN: (process.env.TARGET_DOMAIN || '').includes('beta.xf') ? (process.env.TARGET_DOMAIN || '').replace('beta.xf', 'beta.xfreehd.com') : process.env.TARGET_DOMAIN,
     KEYWORDS: (process.env.KEYWORDS || "").split(',').map(k => k.trim()).filter(Boolean),
     SEARCH_URL_DEFLORATION: process.env.SEARCH_URL_DEFLORATION,
     MAX_PAGES_DEFLORATION: 50, // Wapas 50 kar diya taaki alternating poora chal sake
