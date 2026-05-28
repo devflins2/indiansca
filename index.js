@@ -340,6 +340,13 @@ async function uploadToTelegram(videoPath, title, thumbPath, channelId, tags, st
 // ============================================================
 async function processPendingVideos() {
     console.log('\n🚀 Starting to process pending videos from database...');
+
+    // ⚡ Startup Recovery: Pichle crash mein 'processing' reh gayi videos ko wapas 'pending' karo
+    const stuckCount = await Video.countDocuments({ status: 'processing' });
+    if (stuckCount > 0) {
+        await Video.updateMany({ status: 'processing' }, { $set: { status: 'pending' } });
+        console.log(`🔧 Recovery: ${stuckCount} stuck 'processing' videos wapas 'pending' kar di gayi.`);
+    }
     
     let lastUploadedChannel = null;
     let uploadStartTime = Date.now();
@@ -450,7 +457,8 @@ async function processPendingVideos() {
                 await updateVideo(video.hash, { status: 'failed', error: err.message, retries });
                 console.log(`⚠️ Video failed permanently after ${CONFIG.MAX_RETRIES} retries.`);
             } else {
-                await updateVideo(video.hash, { retries, error: err.message });
+                // 🐛 BugFix: status wapas 'pending' karo taaki dobara pick ho sake
+                await updateVideo(video.hash, { status: 'pending', retries, error: err.message });
                 console.log(`🔄 Will retry later (Retry ${retries}/${CONFIG.MAX_RETRIES})`);
                 await sleep(5000); // Wait a bit before picking up the next task
             }
