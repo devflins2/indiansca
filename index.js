@@ -129,16 +129,20 @@ async function getTelegramClient() {
     const session = tgClient.session.save();
     if (session) {
         const envPath = path.join(__dirname, '.env');
-        let env = fs.readFileSync(envPath, 'utf8');
-        
-        if (env.includes('STRING_SESSION=')) {
-            env = env.replace(/^STRING_SESSION=.*$/m, `STRING_SESSION=${session}`);
+        if (fs.existsSync(envPath)) {
+            let env = fs.readFileSync(envPath, 'utf8');
+            
+            if (env.includes('STRING_SESSION=')) {
+                env = env.replace(/^STRING_SESSION=.*$/m, `STRING_SESSION=${session}`);
+            } else {
+                env += `\nSTRING_SESSION=${session}`;
+            }
+            
+            fs.writeFileSync(envPath, env);
+            console.log('\n🔑 Naya STRING_SESSION automatically .env mein save ho gaya hai!');
         } else {
-            env += `\nSTRING_SESSION=${session}`;
+            console.log('\n🔑 Telegram Session is live!');
         }
-        
-        fs.writeFileSync(envPath, env);
-        console.log('\n🔑 Naya STRING_SESSION automatically .env mein save ho gaya hai!');
     }
 
     console.log('✅ Telegram Connected!');
