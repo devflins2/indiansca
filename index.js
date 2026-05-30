@@ -224,9 +224,9 @@ async function downloadVideo(videoPageUrl, outputPath, title, statusMsgId, chann
                 const pct = parseFloat(match[1]).toFixed(1);
                 const now = Date.now();
 
-                if (now - lastTerminalUpdate > 3000) {
+                if (now - lastTerminalUpdate > 10000) {
                     lastTerminalUpdate = now;
-                    process.stdout.write(`\r   ⬇️  ${pct}%   `);
+                    console.log(`   ⬇️  Downloading: ${pct}%`);
                 }
 
                 if (statusMsgId && client && now - lastTgUpdate > 10000) {
@@ -358,9 +358,9 @@ async function processOneVideo(video, channelId, tags) {
                         if (total > 0) {
                             const pct = ((uploaded / total) * 100).toFixed(1);
                             const now = Date.now();
-                            if (now - lastUploadUpdate > 3000) {
+                             if (now - lastUploadUpdate > 10000) {
                                 lastUploadUpdate = now;
-                                process.stdout.write(`\r   📤 ${pct}%   `);
+                                console.log(`   📤 Uploading: ${pct}%`);
                             }
                             if (statusMsgId && now - lastUploadUpdate > 10000) {
                                 client.editMessage(channelId, {
@@ -372,7 +372,6 @@ async function processOneVideo(video, channelId, tags) {
                         }
                     }
                 });
-                process.stdout.write('\n');
                 break;
             } catch (e) {
                 console.error(`\n❌ Upload fail (attempt ${attempt}/${CONFIG.MAX_RETRIES}): ${e.message}`);
