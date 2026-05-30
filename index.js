@@ -1,19 +1,27 @@
 // ============================================================
-// XFREEHD SCRAPER + TELEGRAM UPLOADER (FULL MERGED)
-// Tech: Node.js + Playwright + GramJS + MongoDB + BullMQ
+// XFREEHD SCRAPER + TELEGRAM UPLOADER — CLEAN VERSION
+// No MongoDB | No Workers | Straight Pipeline
 // ============================================================
 
 import dotenv from 'dotenv';
 dotenv.config();
 
+// ━━━ GLOBAL CRASH PREVENTION ━━━
+process.on('unhandledRejection', (reason) => {
+    const msg = reason?.message || String(reason);
+    if (msg.includes('TIMEOUT') || msg.includes('FLOOD') || msg.includes('_updateLoop')) return;
+    console.error('⚠️  Unhandled:', msg);
+});
+process.on('uncaughtException', (err) => {
+    const msg = err?.message || String(err);
+    if (msg.includes('TIMEOUT') || msg.includes('FLOOD')) return;
+    console.error('⚠️  Uncaught:', msg);
+});
+
 import { chromium } from 'playwright-extra';
 import stealth from 'puppeteer-extra-plugin-stealth';
 import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
-import { NewMessage } from 'telegram/events/index.js';
-import mongoose from 'mongoose';
-
-import { createHash } from 'crypto';
 import ytDlp from 'yt-dlp-exec';
 const ytDlpExec = ytDlp.exec;
 import ffmpeg from 'fluent-ffmpeg';
@@ -27,118 +35,157 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 chromium.use(stealth());
 
 // ============================================================
-// CONFIG — SIRF YAHAN LINK CHANGE KARO
+// CONFIG
 // ============================================================
 const CONFIG = {
-    // .env file se configurations load ho rahe hain
-    CHANNEL_ID_KEYWORDS: process.env.CHANNEL_ID_KEYWORDS,
+    // Channels
+    CHANNEL_ID_KEYWORDS:    process.env.CHANNEL_ID_KEYWORDS,
     CHANNEL_ID_DEFLORATION: process.env.CHANNEL_ID_DEFLORATION,
-    TARGET_DOMAIN: (process.env.TARGET_DOMAIN || '').includes('beta.xf') ? (process.env.TARGET_DOMAIN || '').replace('beta.xf', 'beta.xfreehd.com') : process.env.TARGET_DOMAIN,
-    KEYWORDS: (process.env.KEYWORDS || "").split(',').map(k => k.trim()).filter(Boolean),
-    SEARCH_URL_DEFLORATION: process.env.SEARCH_URL_DEFLORATION,
-    MAX_PAGES_DEFLORATION: 50, // Wapas 50 kar diya taaki alternating poora chal sake
-    MAX_PAGES_KEYWORDS: 1,    // Har keyword ka 1 page
 
-    DOWNLOAD_PATH: path.join(__dirname, 'downloads'),
-    THUMB_PATH: path.join(__dirname, 'thumbs'),
-    TEST_MODE: false, 
-    DELAY_BETWEEN_UPLOADS: 30 * 1000, // 30 seconds ka gap har video ke beech
-    UPLOAD_SESSION_DURATION: 15 * 60 * 1000, // 15 minutes tak lagatar upload karega
-    UPLOAD_REST_DURATION: 15 * 60 * 1000, // 15 minute ka lamba rest lega ban se bachne ke liye
-    DELAY_BETWEEN_PAGES: 5000,      // 5 sec delay (Website ban / IP block se bachne ke liye)
-    MAX_FILE_SIZE: '1900M',         // Telegram ki maximum 2GB limit hoti hai, toh hum 1.9GB tak allow kar rahe hain
-    MAX_RETRIES: 3,
+    // Scraping
+    TARGET_DOMAIN:           (process.env.TARGET_DOMAIN || '').replace(/\/$/, ''),
+    KEYWORDS:                (process.env.KEYWORDS || '').split(',').map(k => k.trim()).filter(Boolean),
+    SEARCH_URL_DEFLORATION:  process.env.SEARCH_URL_DEFLORATION,
+    MAX_PAGES_DEFLORATION:   50,
+    DELAY_BETWEEN_PAGES:     5000,  // 5 sec between page loads
+
+    // Download/Upload
+    DOWNLOAD_PATH:           path.join(__dirname, 'downloads'),
+    THUMB_PATH:              path.join(__dirname, 'thumbs'),
+    MAX_FILE_SIZE:           '1900M',
+    MAX_RETRIES:             3,
+
+    // Timing
+    DELAY_BETWEEN_VIDEOS:   10 * 1000,      // 10 sec between videos
+    REST_AFTER_PAGE:        15 * 60 * 1000, // 15 min rest after each page batch
 
     // Telegram
-    API_ID: parseInt(process.env.API_ID),
-    API_HASH: process.env.API_HASH,
-    PHONE: process.env.PHONE,
+    API_ID:         parseInt(process.env.API_ID),
+    API_HASH:       process.env.API_HASH,
+    PHONE:          process.env.PHONE,
     STRING_SESSION: process.env.STRING_SESSION || '',
 
-    // MongoDB
-    MONGO_URI: process.env.MONGO_URI,
-
+    // Duplicate tracking file (no MongoDB needed)
+    SEEN_FILE: path.join(__dirname, 'seen.json'),
 };
 
 // ============================================================
-// MONGODB SETUP + SCHEMA
+// DUPLICATE TRACKING — Simple JSON file
 // ============================================================
-const videoSchema = new mongoose.Schema({
-    hash: { type: String, unique: true },
-    title: String,
-    originalUrl: String,
-    directUrl: String,
-    fileId: String,
-    messageId: Number,
-    channelId: String,
-    tags: String,
-    status: { type: String, default: 'pending' },  // pending | uploaded | failed
-    uploadedAt: { type: Date, default: Date.now },
-    retries: { type: Number, default: 0 },
-    error: String,
-});
-
-const Video = mongoose.model('Video', videoSchema);
-
-async function connectDB() {
-    await mongoose.connect(CONFIG.MONGO_URI);
-    console.log('✅ MongoDB Connected');
-}
-
-function generateHash(url, title) {
-    return createHash('md5').update(url + title).digest('hex');
-}
-
-async function isDuplicate(url, title) {
-    const hash = generateHash(url, title);
-    const exists = await Video.findOne({ hash });
-    return { isDup: !!exists, hash };
-}
-
-async function saveVideo(data) {
+function loadSeen() {
     try {
-        await Video.create(data);
-    } catch (e) {
-        if (e.code !== 11000) throw e; // ignore duplicate key error
+        return new Set(JSON.parse(fs.readFileSync(CONFIG.SEEN_FILE, 'utf8')));
+    } catch {
+        return new Set();
     }
 }
 
-async function updateVideo(hash, update) {
-    await Video.updateOne({ hash }, { $set: update });
+function markSeen(url) {
+    const seen = loadSeen();
+    seen.add(url);
+    fs.writeFileSync(CONFIG.SEEN_FILE, JSON.stringify([...seen]));
+}
+
+function isSeen(url) {
+    return loadSeen().has(url);
 }
 
 // ============================================================
-// SINGLE PAGE SCRAPER (FAST & ALTERNATING)
+// TELEGRAM CLIENT
 // ============================================================
-async function scrapeSinglePage(page, url, topicName) {
-    console.log(`\n🔍 Scraping: ${topicName}`);
-    
+let tgClient = null;
+
+async function getTelegramClient() {
+    if (tgClient) {
+        if (!tgClient.connected) {
+            await tgClient.connect();
+        }
+        return tgClient;
+    }
+
+    const forceNewSession = process.argv.includes('--gen-session');
+    const sessionString = forceNewSession ? '' : CONFIG.STRING_SESSION;
+
+    tgClient = new TelegramClient(
+        new StringSession(sessionString),
+        CONFIG.API_ID,
+        CONFIG.API_HASH,
+        {
+            connectionRetries: 10,
+            retryDelay: 3000,
+            autoReconnect: true,
+            requestRetries: 5,
+            floodSleepThreshold: 60,
+        }
+    );
+
+    await tgClient.start({
+        phoneNumber: async () => CONFIG.PHONE || await input.text('Phone Number (e.g. +919876543210): '),
+        password:    async () => await input.text('2FA Password: '),
+        phoneCode:   async () => await input.text('OTP Code: '),
+        onError:     (err) => console.error('TG Error:', err.message),
+    });
+
+    const session = tgClient.session.save();
+    if (session) {
+        const envPath = path.join(__dirname, '.env');
+        let env = fs.readFileSync(envPath, 'utf8');
+        
+        if (env.includes('STRING_SESSION=')) {
+            env = env.replace(/^STRING_SESSION=.*$/m, `STRING_SESSION=${session}`);
+        } else {
+            env += `\nSTRING_SESSION=${session}`;
+        }
+        
+        fs.writeFileSync(envPath, env);
+        console.log('\n🔑 Naya STRING_SESSION automatically .env mein save ho gaya hai!');
+    }
+
+    console.log('✅ Telegram Connected!');
+    return tgClient;
+}
+
+// ============================================================
+// SCRAPER — Ek page ke videos fetch karo
+// ============================================================
+async function scrapePage(page, url, label) {
+    console.log(`\n🔍 Scraping: ${label}`);
+    console.log(`   URL: ${url}`);
+
     try {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
         await page.waitForTimeout(CONFIG.DELAY_BETWEEN_PAGES);
 
-        const videoCount = await page.$$eval('a.video-link', els => els.length).catch(() => 0);
-        if (videoCount === 0) {
-            console.log(`⚠️  Koi video nahi mila.`);
-            return [];
-        }
-
         const videos = await page.evaluate((domain) => {
-            const cards = document.querySelectorAll('a.video-link, .thumb-block a, .video-item a');
+            const cards = document.querySelectorAll('a.video-link, .thumb-block a, .video-item a, .video-thumb a');
             return Array.from(cards).map(el => {
                 const href = el.getAttribute('href') || '';
-                const titleEl = el.querySelector('h6, .title, span.title, p.title');
+                const titleEl =
+                    el.querySelector('h6') ||
+                    el.querySelector('.title') ||
+                    el.querySelector('span.title') ||
+                    el.querySelector('.video-title') ||
+                    el.querySelector('strong') ||
+                    el.querySelector('span');
+
+                const title =
+                    titleEl?.innerText?.trim() ||
+                    titleEl?.textContent?.trim() ||
+                    el.getAttribute('title') ||
+                    el.querySelector('img')?.getAttribute('alt') ||
+                    el.textContent?.trim() || '';
+
                 return {
-                    title: titleEl?.innerText?.trim() || el.getAttribute('title') || 'Untitled',
+                    title: title.slice(0, 200) || 'Untitled',
                     url: href.startsWith('http') ? href : domain + href
                 };
-            }).filter(v => v.url && v.url.includes('/video/'));
+            }).filter(v => v.url && v.url.includes('/video/') && v.title !== 'Untitled');
         }, CONFIG.TARGET_DOMAIN);
 
         console.log(`✅ Found: ${videos.length} videos`);
         return videos;
     } catch (err) {
-        console.error(`❌ Page error:`, err.message);
+        console.error(`❌ Scrape error: ${err.message}`);
         return [];
     }
 }
@@ -146,440 +193,373 @@ async function scrapeSinglePage(page, url, topicName) {
 // ============================================================
 // DOWNLOADER
 // ============================================================
-async function downloadVideo(directUrl, filename, videoPageUrl, statusMsgId, client, channelId, title) {
-    const outputPath = path.join(CONFIG.DOWNLOAD_PATH, filename);
+async function downloadVideo(videoPageUrl, outputPath, title, statusMsgId, channelId) {
+    const client = tgClient;
 
-    if (!fs.existsSync(CONFIG.DOWNLOAD_PATH)) {
-        fs.mkdirSync(CONFIG.DOWNLOAD_PATH, { recursive: true });
-    }
-
-    console.log(`⬇️  Downloading: ${filename}`);
+    console.log(`\n⬇️  Downloading: ${title}`);
+    console.log(`   From: ${videoPageUrl}`);
 
     return new Promise((resolve, reject) => {
-        let lastUpdate = 0;
+        let lastTerminalUpdate = 0;
+        let lastTgUpdate = 0;
 
-        const subprocess = ytDlpExec(videoPageUrl, {
+        const proc = ytDlpExec(videoPageUrl, {
             output: outputPath,
             noWarnings: true,
             noCheckCertificates: true,
             addHeader: [`referer:${CONFIG.TARGET_DOMAIN}`],
-            format: 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            format: 'bestvideo+bestaudio/best',
             maxFilesize: CONFIG.MAX_FILE_SIZE,
             mergeOutputFormat: 'mp4',
         });
 
-        let lastTerminalUpdate = 0;
-
-        subprocess.stdout.on('data', (chunk) => {
+        proc.stdout?.on('data', (chunk) => {
             const text = chunk.toString();
             const match = text.match(/\[download\]\s+([\d\.]+)%/);
             if (match) {
-                const pct = match[1];
-                
+                const pct = parseFloat(match[1]).toFixed(1);
                 const now = Date.now();
-                
-                if (now - lastTerminalUpdate > 20000) { // Sirf 20 second mein ek baar terminal pe dikhaye taaki spam na ho
+
+                if (now - lastTerminalUpdate > 3000) {
                     lastTerminalUpdate = now;
-                    console.log(`⬇️ Download Progress: ${pct}%`);
+                    process.stdout.write(`\r   ⬇️  ${pct}%   `);
                 }
 
-                // 10 second throttle for Telegram edit
-                if (statusMsgId && client && (now - lastUpdate > 10000)) {
-                    lastUpdate = now;
+                if (statusMsgId && client && now - lastTgUpdate > 10000) {
+                    lastTgUpdate = now;
                     client.editMessage(channelId, {
                         message: statusMsgId,
-                        text: `⬇️ **Downloading Video...**\n⏳ Progress: ${pct}%\n\n🎬 ${title}`,
+                        text: `⬇️ **Downloading...**\n\n🎬 ${title}\n\n⏳ ${pct}%`,
                         parseMode: 'md'
-                    }).catch(()=>{});
+                    }).catch(() => {});
                 }
             }
         });
 
-        subprocess.on('close', (code) => {
-            process.stdout.write('\n');
-            if (code === 0) resolve(outputPath);
-            else reject(new Error(`yt-dlp failed with code ${code}`));
+        proc.stderr?.on('data', (chunk) => {
+            const t = chunk.toString();
+            if (t.includes('ERROR')) console.error(`\n❌ yt-dlp: ${t.trim()}`);
         });
 
-        subprocess.on('error', (err) => reject(err));
+        proc.on('close', (code) => {
+            process.stdout.write('\n');
+            if (code === 0) {
+                console.log(`✅ Download complete!`);
+                resolve();
+            } else {
+                reject(new Error(`yt-dlp exit code ${code}`));
+            }
+        });
+
+        proc.on('error', reject);
     });
 }
 
 // ============================================================
-// THUMBNAIL GENERATOR
+// THUMBNAIL
 // ============================================================
 async function generateThumbnail(videoPath, hash) {
     if (!fs.existsSync(CONFIG.THUMB_PATH)) {
         fs.mkdirSync(CONFIG.THUMB_PATH, { recursive: true });
     }
-
     const thumbPath = path.join(CONFIG.THUMB_PATH, `${hash}.jpg`);
-
     return new Promise((resolve) => {
         ffmpeg(videoPath)
-            .screenshots({
-                count: 1,
-                folder: CONFIG.THUMB_PATH,
-                filename: `${hash}.jpg`,
-                timemarks: ['10%']
-            })
+            .screenshots({ count: 1, folder: CONFIG.THUMB_PATH, filename: `${hash}.jpg`, timemarks: ['10%'] })
             .on('end', () => resolve(thumbPath))
             .on('error', () => resolve(null));
     });
 }
 
 // ============================================================
-// TELEGRAM CLIENT SETUP
+// PROCESS ONE VIDEO — Download + Upload
 // ============================================================
-let tgClient = null;
+async function processOneVideo(video, channelId, tags) {
+    const { title, url } = video;
 
-async function getTelegramClient() {
-    if (tgClient?.connected) return tgClient;
+    console.log(`\n╔══════════════════════════════════════════╗`);
+    console.log(`║ 🎬 Processing: ${title.slice(0, 34)}`);
+    console.log(`╚══════════════════════════════════════════╝`);
 
-    tgClient = new TelegramClient(
-        new StringSession(CONFIG.STRING_SESSION),
-        CONFIG.API_ID,
-        CONFIG.API_HASH,
-        {
-            connectionRetries: -1,          // Unlimited retries (kabhi give up mat kar)
-            retryDelay: 3000,               // 3 sec wait between retries
-            autoReconnect: true,
-            requestRetries: 5,              // Har request 5 baar retry karega
-            keepAliveInterval: 10000,       // Har 10 sec mein ping bhejega → idle disconnect nahi hoga
-            floodSleepThreshold: 60,        // FloodWait errors ko auto handle karega
-        }
-    );
+    // Ensure dirs exist
+    if (!fs.existsSync(CONFIG.DOWNLOAD_PATH)) fs.mkdirSync(CONFIG.DOWNLOAD_PATH, { recursive: true });
 
-    await tgClient.start({
-        phoneNumber: async () => CONFIG.PHONE,
-        password: async () => await input.text('2FA Password (agar ho to): '),
-        phoneCode: async () => await input.text('OTP Code: '),
-        onError: (err) => console.error('TG Error:', err),
-    });
+    const hash     = Buffer.from(url).toString('base64').replace(/[^a-z0-9]/gi, '').slice(0, 32);
+    const filePath = path.join(CONFIG.DOWNLOAD_PATH, `${hash}.mp4`);
+    let thumbPath  = null;
+    let statusMsgId = null;
 
-    const session = tgClient.session.save();
-    if (session && !CONFIG.STRING_SESSION) {
-        console.log('\n🔑 STRING_SESSION (ise .env mein daal do):\n', session, '\n');
-        // Auto .env mein save
-        const envPath = path.join(__dirname, '.env');
-        let envContent = fs.readFileSync(envPath, 'utf8');
-        envContent = envContent.replace('STRING_SESSION=', `STRING_SESSION=${session}`);
-        fs.writeFileSync(envPath, envContent);
-        console.log('✅ Session .env mein save ho gaya!');
-    }
+    try {
+        console.log(`🔗 Connecting to Telegram...`);
+        const client = await getTelegramClient();
 
-    console.log('✅ Telegram Client Connected');
-    return tgClient;
-}
+        // ━━━ STEP 1: Send link to your Telegram DM (Saved Messages) ━━━
+        console.log(`📤 Sending direct link to your DM (Saved Messages)...`);
+        const dmText = `🌟 **NEW VIDEO SCRAPED** 🌟\n\n🎬 **Title:** ${title}\n🔗 **Link:** ${url}\n\n🏷️ **Tags:** ${tags}`;
+        await client.sendMessage('me', {
+            message: dmText,
+            parseMode: 'md',
+            linkPreview: true
+        }).catch(err => console.warn(`⚠️ DM send failed: ${err.message}`));
 
-// ============================================================
-// UPLOADER
-// ============================================================
-async function uploadToTelegram(videoPath, title, thumbPath, channelId, tags, statusMsgId) {
-    const client = await getTelegramClient();
-
-    const caption = [
-        `🎬 **${title}**`,
-        ``,
-        tags,
-    ].join('\n');
-
-    let retries = 0;
-    let lastUpdate = 0;
-    let lastTerminalUpdate = 0;
-    
-    while (retries < CONFIG.MAX_RETRIES) {
+        // ━━━ STEP 2: Send Channel Status Message ━━━
         try {
-            const message = await client.sendFile(channelId, {
-                file: videoPath,
-                thumb: thumbPath || undefined,
-                caption: caption,
-                parseMode: 'md',
-                supportsStreaming: true,
-                workers: 4,                     // Parallel upload workers
-                progressCallback: (uploaded, total) => {
-                    if (total > 0) {
-                        const pct = ((uploaded / total) * 100).toFixed(1);
+            const msg = await client.sendMessage(channelId, {
+                message: `⬇️ **Downloading...**\n\n🎬 ${title}\n\n⏳ Starting...`,
+                parseMode: 'md'
+            });
+            statusMsgId = msg.id;
+            console.log(`✅ Status message sent! (ID: ${statusMsgId})`);
+        } catch (e) {
+            console.warn(`⚠️ Status message send fail: ${e.message}`);
+        }
 
-                        const now = Date.now();
-                        if (now - lastTerminalUpdate > 20000) {
-                            lastTerminalUpdate = now;
-                            console.log(`📤 Telegram Uploading: ${pct}%`);
-                        }
+        // ━━━ STEP 3: Download Video File ━━━
+        await downloadVideo(url, filePath, title, statusMsgId, channelId);
 
-                        // 10 second throttle for Telegram edit
-                        if (statusMsgId && (now - lastUpdate > 10000)) {
-                            lastUpdate = now;
-                            client.editMessage(channelId, {
-                                message: statusMsgId,
-                                text: `📤 **Uploading to Telegram...**\n⏳ Progress: ${pct}%\n\n🎬 ${title}`,
-                                parseMode: 'md'
-                            }).catch(()=>{});
+        if (!fs.existsSync(filePath)) throw new Error('File nahi bani after download.');
+        const { size } = fs.statSync(filePath);
+        if (size < 100000) throw new Error(`File too small: ${size} bytes`);
+        console.log(`   Size: ${(size / 1024 / 1024).toFixed(1)} MB`);
+
+        // ━━━ STEP 4: Generate Thumbnail ━━━
+        console.log(`\n🖼️ [2/3] Thumbnail...`);
+        thumbPath = await generateThumbnail(filePath, hash);
+
+        // Update Channel Status to Uploading
+        if (statusMsgId) {
+            await client.editMessage(channelId, {
+                message: statusMsgId,
+                text: `📤 **Uploading...**\n\n🎬 ${title}\n\n⏳ 0%`,
+                parseMode: 'md'
+            }).catch(() => {});
+        }
+
+        // ━━━ STEP 5: Upload Video to Channel ━━━
+        console.log(`\n📤 [3/3] Uploading to Telegram Channel...`);
+        const caption = `🎬 **${title}**\n\n${tags}`;
+        let lastUploadUpdate = 0;
+        let uploadedMsg = null;
+
+        for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt++) {
+            try {
+                uploadedMsg = await client.sendFile(channelId, {
+                    file: filePath,
+                    thumb: thumbPath || undefined,
+                    caption,
+                    parseMode: 'md',
+                    supportsStreaming: true,
+                    workers: 4,
+                    progressCallback: (uploaded, total) => {
+                        if (total > 0) {
+                            const pct = ((uploaded / total) * 100).toFixed(1);
+                            const now = Date.now();
+                            if (now - lastUploadUpdate > 3000) {
+                                lastUploadUpdate = now;
+                                process.stdout.write(`\r   📤 ${pct}%   `);
+                            }
+                            if (statusMsgId && now - lastUploadUpdate > 10000) {
+                                client.editMessage(channelId, {
+                                    message: statusMsgId,
+                                    text: `📤 **Uploading...**\n\n🎬 ${title}\n\n⏳ ${pct}%`,
+                                    parseMode: 'md'
+                                }).catch(() => {});
+                            }
                         }
                     }
-                }
-            });
-
-            console.log(`✅ Uploaded: ${title} | Message ID: ${message.id}`);
-            return message;
-        } catch (err) {
-            retries++;
-            console.error(`\n❌ Upload failed (retry ${retries}/${CONFIG.MAX_RETRIES}):`, err.message);
-            if (statusMsgId) {
-                await client.editMessage(channelId, { message: statusMsgId, text: `❌ **Upload failed (retry ${retries}/${CONFIG.MAX_RETRIES})...**\n\n🎬 ${title}`, parseMode: 'md' }).catch(()=>{});
-            }
-            await sleep(5000 * retries);
-        }
-    }
-
-    throw new Error(`Upload failed after ${CONFIG.MAX_RETRIES} retries`);
-}
-
-// ============================================================
-// MONGODB QUEUE PROCESSOR
-// ============================================================
-async function processPendingVideos() {
-    console.log('\n🚀 Starting to process pending videos from database...');
-
-    // ⚡ Startup Recovery: Pichle crash mein 'processing' reh gayi videos ko wapas 'pending' karo
-    const stuckCount = await Video.countDocuments({ status: 'processing' });
-    if (stuckCount > 0) {
-        await Video.updateMany({ status: 'processing' }, { $set: { status: 'pending' } });
-        console.log(`🔧 Recovery: ${stuckCount} stuck 'processing' videos wapas 'pending' kar di gayi.`);
-    }
-    
-    let lastUploadedChannel = null;
-    let uploadStartTime = Date.now();
-
-    while (true) {
-        let video = null;
-
-        // Alternating logic (1 Defloration -> 1 Keyword -> 1 Defloration...)
-        if (lastUploadedChannel === CONFIG.CHANNEL_ID_KEYWORDS) {
-            // Pichli baar keyword upload hua tha, ab defloration ki baari hai
-            video = await Video.findOneAndUpdate({ status: 'pending', channelId: CONFIG.CHANNEL_ID_DEFLORATION }, { status: 'processing' }, { new: true });
-            if (!video) video = await Video.findOneAndUpdate({ status: 'pending', channelId: CONFIG.CHANNEL_ID_KEYWORDS }, { status: 'processing' }, { new: true });
-        } else {
-            // Pichli baar defloration tha (ya first time hai), ab keyword ki baari hai
-            video = await Video.findOneAndUpdate({ status: 'pending', channelId: CONFIG.CHANNEL_ID_KEYWORDS }, { status: 'processing' }, { new: true });
-            if (!video) video = await Video.findOneAndUpdate({ status: 'pending', channelId: CONFIG.CHANNEL_ID_DEFLORATION }, { status: 'processing' }, { new: true });
-        }
-        
-        // Agar dono mein kuch nahi mila toh queue empty hai
-        if (!video) {
-            console.log('\n😴 Abhi naye videos nahi hain. 30 seconds wait kar raha hoon...');
-            await sleep(30000);
-            continue; // Loop chalta rahega
-        }
-
-        // Sequence maintain karne ke liye record kar lo ki is baar konsa upload hone jaa raha hai
-        lastUploadedChannel = video.channelId;
-
-        console.log(`\n==========================================`);
-        console.log(`⏳ Uploading next: ${video.title}`);
-        console.log(`==========================================`);
-        
-        let videoPath = null;
-        let thumbPath = null;
-        let statusMsg = null;
-        let tgClient = null;
-
-        try {
-            tgClient = await getTelegramClient();
-            statusMsg = await tgClient.sendMessage(video.channelId, { message: `⬇️ **Downloading Video...**\n\n🎬 ${video.title}`, parseMode: 'md' });
-
-            // 1. Download video
-            const filename = `${video.hash}.mp4`;
-            videoPath = await downloadVideo(video.directUrl, filename, video.originalUrl, statusMsg?.id, tgClient, video.channelId, video.title);
-
-            if (!fs.existsSync(videoPath)) {
-                throw new Error("File bahut badi thi (maxFilesize limit crossed) isliye skip kar di gayi.");
-            }
-
-            const stats = fs.statSync(videoPath);
-            if (stats.size < 100000) { // Agar file 100KB se chhoti hai (matlab error aayi hai)
-                throw new Error("File 0 bytes ya bahut chhoti download hui hai, yt-dlp error.");
-            }
-
-            // 2. Thumbnail generate karo
-            thumbPath = await generateThumbnail(videoPath, video.hash);
-
-            if (statusMsg) {
-                await tgClient.editMessage(video.channelId, { message: statusMsg.id, text: `📤 **Uploading to Telegram...**\n\n🎬 ${video.title}`, parseMode: 'md' }).catch(()=>{});
-            }
-
-            // 3. Telegram pe upload karo
-            const message = await uploadToTelegram(videoPath, video.title, thumbPath, video.channelId, video.tags, statusMsg?.id);
-
-            // Upload complete, status message delete kardo
-            if (statusMsg) {
-                await tgClient.deleteMessages(video.channelId, [statusMsg.id], { revoke: true }).catch(()=>{});
-                statusMsg = null;
-            }
-
-            // 4. DB mein update karo
-            await updateVideo(video.hash, {
-                status: 'uploaded',
-                messageId: message.id,
-                fileId: message.media?.document?.id?.toString() || '',
-                uploadedAt: new Date()
-            });
-
-            console.log(`✅ Done: ${video.title}`);
-            
-            // Cleanup files right away
-            if (videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
-            if (thumbPath && fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
-
-            console.log(`⏳ Waiting ${CONFIG.DELAY_BETWEEN_UPLOADS / 1000} seconds before next video...`);
-            await sleep(CONFIG.DELAY_BETWEEN_UPLOADS);
-
-            const timeElapsed = Date.now() - uploadStartTime;
-            if (timeElapsed >= CONFIG.UPLOAD_SESSION_DURATION) {
-                console.log(`\n⏸️ Bot ne pichle 15 minute se lagatar videos daale hain! Account safe rakhne ke liye ab ${CONFIG.UPLOAD_REST_DURATION / 60000} minute ka aaram karega... 😴`);
-                await sleep(CONFIG.UPLOAD_REST_DURATION);
-                uploadStartTime = Date.now(); // Timer wapas zero se shuru
-                console.log(`\n▶️ Aaram poora hua! Wapas upload shuru kar raha hoon...\n`);
-            }
-
-        } catch (err) {
-            console.error(`❌ Failed: ${video.title} | Error: ${err.message}`);
-            
-            // Cleanup on error
-            if (statusMsg && tgClient) {
-                await tgClient.deleteMessages(video.channelId, [statusMsg.id], { revoke: true }).catch(()=>{});
-            }
-            if (videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
-            if (thumbPath && fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
-
-            const retries = (video.retries || 0) + 1;
-            if (retries >= CONFIG.MAX_RETRIES) {
-                await updateVideo(video.hash, { status: 'failed', error: err.message, retries });
-                console.log(`⚠️ Video failed permanently after ${CONFIG.MAX_RETRIES} retries.`);
-            } else {
-                // 🐛 BugFix: status wapas 'pending' karo taaki dobara pick ho sake
-                await updateVideo(video.hash, { status: 'pending', retries, error: err.message });
-                console.log(`🔄 Will retry later (Retry ${retries}/${CONFIG.MAX_RETRIES})`);
-                await sleep(5000); // Wait a bit before picking up the next task
+                });
+                process.stdout.write('\n');
+                break;
+            } catch (e) {
+                console.error(`\n❌ Upload fail (attempt ${attempt}/${CONFIG.MAX_RETRIES}): ${e.message}`);
+                if (attempt >= CONFIG.MAX_RETRIES) throw e;
+                await sleep(5000 * attempt);
             }
         }
+
+        // Delete channel status message
+        if (statusMsgId) {
+            await client.deleteMessages(channelId, [statusMsgId], { revoke: true }).catch(() => {});
+        }
+
+        console.log(`\n🎉 DONE! "${title}" uploaded to channel! (Msg ID: ${uploadedMsg.id})`);
+
+        // Mark as seen (duplicate prevention) ONLY after 100% successful process!
+        markSeen(url);
+        return true;
+
+    } catch (err) {
+        console.error(`\n❌ FAILED: ${title}\n   Reason: ${err.message}`);
+
+        // Delete status message on failure
+        if (statusMsgId && tgClient) {
+            await tgClient.deleteMessages(channelId, [statusMsgId], { revoke: true }).catch(() => {});
+        }
+        return false;
+
+    } finally {
+        // Cleanup files
+        if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        if (thumbPath && fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
     }
 }
 
 // ============================================================
-// UTILS
+// MAIN PIPELINE
 // ============================================================
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+async function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
 }
 
-function sanitizeFilename(name) {
-    return name.replace(/[^a-z0-9\s]/gi, '').replace(/\s+/g, '_').slice(0, 50);
-}
-
-// ============================================================
-// MAIN FUNCTION
-// ============================================================
 async function main() {
-    console.log('🚀 XFreeHD Scraper + Telegram Uploader Starting...\n');
+    console.log('\n🚀 ══════════════════════════════════');
+    console.log('🚀  XFreeHD BOT — CLEAN VERSION');
+    console.log('🚀 ══════════════════════════════════\n');
 
-    // Dummy Express Server (Render Web Service ke liye zaroori hai taaki process fail na ho)
+    // Express server (Render ke liye)
     const app = express();
-    const port = process.env.PORT || 3000;
-    app.get('/', (req, res) => res.send('Bot is running properly!'));
-    app.listen(port, () => console.log(`🌐 Dummy Web Server running on port ${port} (For Render)`));
+    app.get('/', (_, res) => res.send('Bot is running!'));
+    app.listen(process.env.PORT || 3000, () =>
+        console.log(`🌐 Server port ${process.env.PORT || 3000} pe chal raha hai\n`)
+    );
 
-    // 1. DB Connect
-    await connectDB();
-
-    // 2. Gen session mode
+    // Session generation mode
     if (process.argv.includes('--gen-session')) {
-        console.log('🔑 Session Generation Mode...');
         await getTelegramClient();
-        console.log('✅ Session generate ho gaya, ab normal run karo.');
+        console.log('✅ Session ready. Ab normal start karo.');
         process.exit(0);
     }
 
-    if (CONFIG.TEST_MODE) {
-        console.log("🛠️ TEST MODE ON: Sirf 1 round run hoga!");
-    }
+    console.log(`📋 Config:`);
+    console.log(`   Keywords: ${CONFIG.KEYWORDS.join(', ')}`);
+    console.log(`   Defloration pages: ${CONFIG.MAX_PAGES_DEFLORATION}`);
+    console.log(`   Delay between videos: ${CONFIG.DELAY_BETWEEN_VIDEOS / 1000}s`);
+    console.log(`   Rest after page: ${CONFIG.REST_AFTER_PAGE / 60000} min\n`);
 
-    // Start processor parallel mein taaki wait na karna pade
-    processPendingVideos().catch(console.error);
+    console.log('🔗 Connecting to Telegram...');
+    await getTelegramClient();
 
-    let newCount = 0;
-    let dupCount = 0;
-    let totalScraped = 0;
-
-    // Launch single browser for fast alternating scraping
-    const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    // Launch browser
+    const browser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
     const context = await browser.newContext();
-    const page = await context.newPage();
+    const page    = await context.newPage();
 
-    // Determine max rounds
-    let maxRounds = Math.max(CONFIG.KEYWORDS.length, CONFIG.MAX_PAGES_DEFLORATION);
-    if (CONFIG.TEST_MODE) maxRounds = 1;
+    let deflPage     = 1;
+    let deflDone     = false;
+    let kwIndex      = 0;
+    const keywords   = [...CONFIG.KEYWORDS];
+    let totalUploaded = 0;
+    let totalFailed   = 0;
+    let totalSkipped  = 0;
 
-    let stopDefloration = false;
+    // ━━━ MAIN LOOP ━━━
+    while (!deflDone || kwIndex < keywords.length) {
 
-    for (let i = 0; i < maxRounds; i++) {
-        // 1. Defloration Scrape (Round i)
-        if (i < CONFIG.MAX_PAGES_DEFLORATION && !stopDefloration) {
-            const url = `${CONFIG.SEARCH_URL_DEFLORATION}&page=${i + 1}`;
-            const videos = await scrapeSinglePage(page, url, `Defloration (Page ${i + 1})`);
-            
+        // ─── Defloration Page ───
+        if (!deflDone) {
+            const url    = `${CONFIG.SEARCH_URL_DEFLORATION}&page=${deflPage}`;
+            const videos = await scrapePage(page, url, `Defloration Page ${deflPage}`);
+
             if (videos.length === 0) {
-                stopDefloration = true;
-                console.log(`⏹️ Defloration ke videos khatam! Ab aage ke pages skip kar raha hoon...`);
+                console.log(`\n⏹️  Defloration khatam! Koi naya page nahi.`);
+                deflDone = true;
             } else {
-                totalScraped += videos.length;
-                
-                for (const v of videos) {
-                    const { isDup, hash } = await isDuplicate(v.url, v.title);
-                    if (isDup) { dupCount++; continue; }
-                    await saveVideo({
-                        hash, title: v.title, originalUrl: v.url, directUrl: '',
-                        channelId: CONFIG.CHANNEL_ID_DEFLORATION, tags: `#defloration #teen #virgin #18plus`, status: 'pending'
-                    });
-                    newCount++;
+                let pageUploaded = 0;
+                for (const video of videos) {
+                    if (isSeen(video.url)) {
+                        console.log(`  ⏭️  Skip (already done): ${video.title}`);
+                        totalSkipped++;
+                        continue;
+                    }
+
+                    const ok = await processOneVideo(
+                        video,
+                        CONFIG.CHANNEL_ID_DEFLORATION,
+                        '#defloration #teen #virgin #18plus'
+                    );
+
+                    if (ok) { totalUploaded++; pageUploaded++; }
+                    else    { totalFailed++; }
+
+                    if (videos.indexOf(video) < videos.length - 1) {
+                        console.log(`\n⏳ Next video se pehle ${CONFIG.DELAY_BETWEEN_VIDEOS / 1000}s wait...`);
+                        await sleep(CONFIG.DELAY_BETWEEN_VIDEOS);
+                    }
                 }
+
+                console.log(`\n📊 Defloration Page ${deflPage}: ${pageUploaded} uploaded`);
+
+                if (pageUploaded > 0) {
+                    console.log(`\n😴 Page done! ${CONFIG.REST_AFTER_PAGE / 60000} min rest...`);
+                    await sleep(CONFIG.REST_AFTER_PAGE);
+                    console.log(`▶️  Rest khatam! Agla page...\n`);
+                }
+
+                deflPage++;
             }
         }
 
-        // 2. Keyword Scrape (Round i)
-        if (i < CONFIG.KEYWORDS.length) {
-            const keyword = CONFIG.KEYWORDS[i];
-            const url = `${CONFIG.TARGET_DOMAIN}/search?search_query=${encodeURIComponent(keyword)}&search_type=videos&o=tf&page=1`;
-            const videos = await scrapeSinglePage(page, url, `Keyword: ${keyword}`);
-            totalScraped += videos.length;
-            
-            for (const v of videos) {
-                const { isDup, hash } = await isDuplicate(v.url, v.title);
-                if (isDup) { dupCount++; continue; }
-                await saveVideo({
-                    hash, title: v.title, originalUrl: v.url, directUrl: '',
-                    channelId: CONFIG.CHANNEL_ID_KEYWORDS, tags: `#${keyword.replace(/\s+/g, '')} #desi #indian #18plus`, status: 'pending'
-                });
-                newCount++;
+        // ─── Keyword ───
+        if (kwIndex < keywords.length) {
+            const keyword = keywords[kwIndex];
+            const url     = `${CONFIG.TARGET_DOMAIN}/search?search_query=${encodeURIComponent(keyword)}&search_type=videos&o=tf&page=1`;
+            const videos  = await scrapePage(page, url, `Keyword: ${keyword}`);
+
+            if (videos.length === 0) {
+                console.log(`  ⏭️  "${keyword}" mein koi video nahi. Next keyword...`);
+            } else {
+                let pageUploaded = 0;
+                for (const video of videos) {
+                    if (isSeen(video.url)) {
+                        console.log(`  ⏭️  Skip (already done): ${video.title}`);
+                        totalSkipped++;
+                        continue;
+                    }
+
+                    const ok = await processOneVideo(
+                        video,
+                        CONFIG.CHANNEL_ID_KEYWORDS,
+                        `#${keyword.replace(/\s+/g, '')} #desi #indian #18plus`
+                    );
+
+                    if (ok) { totalUploaded++; pageUploaded++; }
+                    else    { totalFailed++; }
+
+                    if (videos.indexOf(video) < videos.length - 1) {
+                        console.log(`\n⏳ Next video se pehle ${CONFIG.DELAY_BETWEEN_VIDEOS / 1000}s wait...`);
+                        await sleep(CONFIG.DELAY_BETWEEN_VIDEOS);
+                    }
+                }
+
+                console.log(`\n📊 Keyword "${keyword}": ${pageUploaded} uploaded`);
+
+                if (pageUploaded > 0) {
+                    console.log(`\n😴 Keyword done! ${CONFIG.REST_AFTER_PAGE / 60000} min rest...`);
+                    await sleep(CONFIG.REST_AFTER_PAGE);
+                    console.log(`▶️  Rest khatam! Agla keyword...\n`);
+                }
             }
+
+            kwIndex++;
         }
     }
 
     await browser.close();
 
-    console.log(`\n📊 Total Summary:`);
-    console.log(`   ✅ New Videos Added to Queue: ${newCount}`);
-    console.log(`   🔁 Duplicates Skipped: ${dupCount}`);
-    console.log(`   📦 Total Videos Scraped: ${totalScraped}`);
-    console.log(`\n🎉 Scraping poori ho gayi hai!`);
-    console.log(`⏳ Bot ab continuously background mein videos upload karta rahega (Ctrl+C dabane tak)\n`);
+    console.log(`\n🎉 ══ ALL DONE! ══`);
+    console.log(`   ✅ Uploaded: ${totalUploaded}`);
+    console.log(`   ❌ Failed:   ${totalFailed}`);
+    console.log(`   ⏭️  Skipped:  ${totalSkipped}`);
+    console.log(`\n⏳ 30 min baad wapas shuru hoga...`);
+
+    await sleep(30 * 60 * 1000);
+
+    // Restart
+    console.log('\n🔄 Restarting...\n');
+    await main();
 }
 
-// ============================================================
-// RUN
-// ============================================================
-main().catch(async (err) => {
-    console.error('\n💥 Fatal Error:', err);
-    await mongoose.disconnect();
-    process.exit(1);
-});
+main().catch(err => console.error('💥 Fatal:', err.message));

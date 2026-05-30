@@ -4,3 +4,4 @@ downloads/
 thumbs/
 clear_db.js
 check_db.js
+seen.json
