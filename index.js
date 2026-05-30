@@ -292,6 +292,7 @@ async function processOneVideo(video, channelId, tags) {
     const filePath = path.join(CONFIG.DOWNLOAD_PATH, `${hash}.mp4`);
     let thumbPath  = null;
     let statusMsgId = null;
+    let uploadMsgId = null;
 
     try {
         console.log(`🔗 Connecting to Telegram...`);
@@ -326,21 +327,28 @@ async function processOneVideo(video, channelId, tags) {
         if (size < 100000) throw new Error(`File too small: ${size} bytes`);
         console.log(`   Size: ${(size / 1024 / 1024).toFixed(1)} MB`);
 
+        // Download message ko turant delete kar do (100% ho gaya)
+        if (statusMsgId) {
+            await client.deleteMessages(channelId, [statusMsgId], { revoke: true }).catch(() => {});
+            statusMsgId = null;
+        }
+
         // ━━━ STEP 4: Generate Thumbnail ━━━
         console.log(`\n🖼️ [2/3] Thumbnail...`);
         thumbPath = await generateThumbnail(filePath, hash);
 
-        // Update Channel Status to Uploading
-        if (statusMsgId) {
-            await client.editMessage(channelId, {
-                message: statusMsgId,
-                text: `📤 **Uploading...**\n\n🎬 ${title}\n\n⏳ 0%`,
-                parseMode: 'md'
-            }).catch(() => {});
-        }
-
         // ━━━ STEP 5: Upload Video to Channel ━━━
         console.log(`\n📤 [3/3] Uploading to Telegram Channel...`);
+        try {
+            const msg = await client.sendMessage(channelId, {
+                message: `📤 **Uploading...**\n\n🎬 ${title}\n\n⏳ 0%`,
+                parseMode: 'md'
+            });
+            uploadMsgId = msg.id;
+        } catch (e) {
+            console.warn(`⚠️ Upload status message send fail: ${e.message}`);
+        }
+
         const caption = `🎬 **${title}**\n\n${tags}`;
         let lastUploadUpdate = 0;
         let uploadedMsg = null;
@@ -362,9 +370,9 @@ async function processOneVideo(video, channelId, tags) {
                                 lastUploadUpdate = now;
                                 console.log(`   📤 Uploading: ${pct}%`);
                             }
-                            if (statusMsgId && now - lastUploadUpdate > 10000) {
+                            if (uploadMsgId && now - lastUploadUpdate > 10000) {
                                 client.editMessage(channelId, {
-                                    message: statusMsgId,
+                                    message: uploadMsgId,
                                     text: `📤 **Uploading...**\n\n🎬 ${title}\n\n⏳ ${pct}%`,
                                     parseMode: 'md'
                                 }).catch(() => {});
@@ -380,9 +388,9 @@ async function processOneVideo(video, channelId, tags) {
             }
         }
 
-        // Delete channel status message
-        if (statusMsgId) {
-            await client.deleteMessages(channelId, [statusMsgId], { revoke: true }).catch(() => {});
+        // Upload message ko bhi delete kar do (upload ho gaya)
+        if (uploadMsgId) {
+            await client.deleteMessages(channelId, [uploadMsgId], { revoke: true }).catch(() => {});
         }
 
         console.log(`\n🎉 DONE! "${title}" uploaded to channel! (Msg ID: ${uploadedMsg.id})`);
@@ -394,9 +402,12 @@ async function processOneVideo(video, channelId, tags) {
     } catch (err) {
         console.error(`\n❌ FAILED: ${title}\n   Reason: ${err.message}`);
 
-        // Delete status message on failure
+        // Delete status messages on failure
         if (statusMsgId && tgClient) {
             await tgClient.deleteMessages(channelId, [statusMsgId], { revoke: true }).catch(() => {});
+        }
+        if (uploadMsgId && tgClient) {
+            await tgClient.deleteMessages(channelId, [uploadMsgId], { revoke: true }).catch(() => {});
         }
         return false;
 
