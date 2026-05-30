@@ -369,13 +369,13 @@ async function processOneVideo(video, channelId, tags) {
                              if (now - lastUploadUpdate > 10000) {
                                 lastUploadUpdate = now;
                                 console.log(`   📤 Uploading: ${pct}%`);
-                            }
-                            if (uploadMsgId && now - lastUploadUpdate > 10000) {
-                                client.editMessage(channelId, {
-                                    message: uploadMsgId,
-                                    text: `📤 **Uploading...**\n\n🎬 ${title}\n\n⏳ ${pct}%`,
-                                    parseMode: 'md'
-                                }).catch(() => {});
+                                if (uploadMsgId) {
+                                    client.editMessage(channelId, {
+                                        message: uploadMsgId,
+                                        text: `📤 **Uploading...**\n\n🎬 ${title}\n\n⏳ ${pct}%`,
+                                        parseMode: 'md'
+                                    }).catch(() => {});
+                                }
                             }
                         }
                     }
