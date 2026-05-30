@@ -363,8 +363,10 @@ async function processOneVideo(video, channelId, tags) {
                     supportsStreaming: true,
                     workers: 4,
                     progressCallback: (uploaded, total) => {
-                        if (total > 0) {
-                            const pct = ((uploaded / total) * 100).toFixed(1);
+                        const up = typeof uploaded === 'bigint' ? Number(uploaded) : uploaded;
+                        const tot = typeof total === 'bigint' ? Number(total) : total;
+                        if (tot > 0) {
+                            const pct = ((up / tot) * 100).toFixed(1);
                             const now = Date.now();
                              if (now - lastUploadUpdate > 10000) {
                                 lastUploadUpdate = now;
